@@ -1,0 +1,919 @@
+import React, { useEffect, useRef, useState } from 'react';
+import axios from 'axios';
+import ParticleBackground from './ParticleBackground';
+import LandingHero from './LandingHero';
+
+const API_BASE_URL = 'https://medresearch-ai-backend.onrender.com';
+
+function App() {
+  const [query, setQuery] = useState('');
+  const [activeTab, setActiveTab] = useState('pubmed');
+  const [pubmedPapers, setPubmedPapers] = useState([]);
+  const [openAlexPapers, setOpenAlexPapers] = useState([]);
+  const [trials, setTrials] = useState([]);
+  const [trialStatusFilter, setTrialStatusFilter] = useState('ALL');
+  const [aiSummary, setAiSummary] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [searched, setSearched] = useState(false);
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const stored = localStorage.getItem('medresearch_user');
+      return stored ? JSON.parse(stored) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem('medresearch_jwt') || '');
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authMode, setAuthMode] = useState('login');
+  const [authForm, setAuthForm] = useState({ name: '', email: '', password: '' });
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [savedHistory, setSavedHistory] = useState([]);
+  const [currentChatId, setCurrentChatId] = useState(null);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const [darkMode, setDarkMode] = useState(false);
+  const [showHowItWorks, setShowHowItWorks] = useState(false);
+  const fileInputRef = useRef(null);
+  const [recentSearches, setRecentSearches] = useState(() => {
+    try {
+      const saved = localStorage.getItem('medresearch_recent_searches');
+      return saved ? JSON.parse(saved) : ['Type 2 Diabetes', 'Asthma biomarkers'];
+    } catch {
+      return ['Type 2 Diabetes', 'Asthma biomarkers'];
+    }
+  });
+
+  const theme = {
+    bg: darkMode ? '#07141f' : '#f5f8ff',
+    panel: darkMode ? '#101d2d' : '#ffffff',
+    panelSecondary: darkMode ? '#152535' : '#edf4ff',
+    panelElevated: darkMode ? '#182b3d' : '#f8fbff',
+    primary: '#2563eb',
+    primarySoft: darkMode ? 'rgba(96,165,250,0.18)' : 'rgba(37,99,235,0.08)',
+    text: darkMode ? '#edf4ff' : '#11213b',
+    secondaryText: darkMode ? '#b3c7df' : '#52657e',
+    border: darkMode ? 'rgba(148,163,184,0.18)' : 'rgba(15,23,42,0.08)',
+    success: '#1d9d6c',
+    warning: '#d97706',
+    danger: '#dc2626',
+    shadow: darkMode ? '0 20px 50px rgba(2,6,23,0.45)' : '0 20px 50px rgba(37,99,235,0.12)',
+    input: darkMode ? '#0d1a2b' : '#f8faff',
+    chip: darkMode ? '#16273b' : '#eef4ff',
+  };
+
+  const fetchHistory = async () => {
+    if (!authToken) return;
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/history`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      setSavedHistory(response.data.chats || []);
+    } catch (error) {
+      console.error('Failed to load history:', error);
+    }
+  };
+
+  useEffect(() => {
+    if (authToken) {
+      fetchHistory();
+    } else {
+      setSavedHistory([]);
+    }
+  }, [authToken]);
+
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthLoading(true);
+
+    const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
+
+    try {
+      const response = await axios.post(`${API_BASE_URL}${endpoint}`, authForm);
+      const { token, user } = response.data;
+
+      localStorage.setItem('medresearch_jwt', token);
+      localStorage.setItem('medresearch_user', JSON.stringify(user));
+      setAuthToken(token);
+      setCurrentUser(user);
+      setAuthModalOpen(false);
+      setAuthForm({ name: '', email: '', password: '' });
+    } catch (error) {
+      setAuthError(error.response?.data?.error || 'Authentication failed.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const saveRecentSearch = (term) => {
+    if (!term || !term.trim()) return;
+    const clean = term.trim();
+    setRecentSearches((prev) => {
+      const filtered = prev.filter((item) => item.toLowerCase() !== clean.toLowerCase());
+      const updated = [clean, ...filtered].slice(0, 6);
+      localStorage.setItem('medresearch_recent_searches', JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  const saveChatToDatabase = async (topicTerm, messages, contextList, chatId = currentChatId) => {
+    if (!authToken || !topicTerm) return;
+    try {
+      const response = await axios.post(
+        `${API_BASE_URL}/api/history/save`,
+        { chatId, title: topicTerm, topic: topicTerm, messages, contextPapers: contextList || [] },
+        { headers: { Authorization: `Bearer ${authToken}` } }
+      );
+      if (response.data?.chat?._id) {
+        setCurrentChatId(response.data.chat._id);
+        fetchHistory();
+      }
+    } catch (error) {
+      console.error('Failed to save chat:', error);
+    }
+  };
+
+  const executeSearch = async (searchTerm, statusFilter = trialStatusFilter, preserveChatId = null) => {
+    if (!searchTerm || !searchTerm.trim()) return;
+    const cleanQuery = searchTerm.trim();
+    setQuery(cleanQuery);
+    setSearched(true);
+    setLoading(true);
+    setAiLoading(true);
+    setAiSummary('');
+    saveRecentSearch(cleanQuery);
+
+    try {
+      const [pubmedRes, openAlexRes, trialsRes] = await Promise.allSettled([
+        axios.get(`${API_BASE_URL}/api/pubmed/search?q=${encodeURIComponent(cleanQuery)}`),
+        axios.get(`${API_BASE_URL}/api/openalex/search?q=${encodeURIComponent(cleanQuery)}`),
+        axios.get(`${API_BASE_URL}/api/trials/search?q=${encodeURIComponent(cleanQuery)}&status=${statusFilter}`),
+      ]);
+
+      const fetchedPubmed = pubmedRes.status === 'fulfilled' ? (pubmedRes.value.data.results || []) : [];
+      const fetchedOpenAlex = openAlexRes.status === 'fulfilled' ? (openAlexRes.value.data.results || []) : [];
+      const fetchedTrials = trialsRes.status === 'fulfilled' ? (trialsRes.value.data.results || []) : [];
+
+      setPubmedPapers(fetchedPubmed);
+      setOpenAlexPapers(fetchedOpenAlex);
+      setTrials(fetchedTrials);
+
+      const combinedPapers = [...fetchedPubmed, ...fetchedOpenAlex];
+      if (combinedPapers.length > 0) {
+        try {
+          const aiRes = await axios.post(`${API_BASE_URL}/api/ai/synthesize`, {
+            query: cleanQuery,
+            papers: combinedPapers.slice(0, 8),
+          });
+          setAiSummary(aiRes.data.summary || 'Summary generated.');
+          if (authToken) {
+            saveChatToDatabase(cleanQuery, [{ role: 'assistant', text: aiRes.data.summary || 'Summary generated.' }], combinedPapers.slice(0, 8), preserveChatId);
+          }
+        } catch (error) {
+          console.error('Synthesis error:', error);
+          setAiSummary('Evidence synthesis is currently unavailable.');
+        }
+      } else {
+        setAiSummary('No academic papers were found for this query.');
+      }
+    } catch (error) {
+      console.error('Search execution failed:', error);
+    } finally {
+      setLoading(false);
+      setAiLoading(false);
+    }
+  };
+
+  const handleSearchSubmit = (e) => {
+    if (e) e.preventDefault();
+    executeSearch(query);
+  };
+
+  const handleTopicClick = (topic) => {
+    const term = topic.query || topic.title || topic;
+    executeSearch(term);
+  };
+
+  const handleRecentClick = (term) => executeSearch(term);
+
+  const handleStatusFilterChange = async (status) => {
+    setTrialStatusFilter(status);
+    if (!query.trim()) return;
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/trials/search?q=${encodeURIComponent(query)}&status=${status}`);
+      setTrials(response.data.results || []);
+    } catch (error) {
+      console.error('Error filtering trials:', error);
+    }
+  };
+
+  const handleSendMessage = async (e) => {
+    e.preventDefault();
+    if (!chatInput.trim() || chatLoading) return;
+
+    const userText = chatInput.trim();
+    const newMessages = [...chatMessages, { role: 'user', text: userText }];
+    setChatMessages(newMessages);
+    setChatInput('');
+    setChatLoading(true);
+
+    try {
+      const combinedPapers = [...pubmedPapers, ...openAlexPapers];
+      const response = await axios.post(`${API_BASE_URL}/api/ai/chat`, {
+        question: userText,
+        contextPapers: combinedPapers,
+        topic: query,
+      });
+
+      const aiReply = response.data.answer;
+      const updatedMessages = [...newMessages, { role: 'assistant', text: aiReply }];
+      setChatMessages(updatedMessages);
+      if (authToken) saveChatToDatabase(query, updatedMessages, combinedPapers.slice(0, 8), currentChatId);
+    } catch (error) {
+      console.error('Chat error:', error);
+      setChatMessages([...newMessages, { role: 'assistant', text: 'Sorry, I could not answer that question.' }]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
+  const handleFileUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const response = await axios.post(`${API_BASE_URL}/api/ai/analyze-report`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const extracted = response.data;
+      if (extracted?.searchTerm) {
+        executeSearch(extracted.searchTerm);
+      }
+    } catch (error) {
+      console.error('Upload analysis failed:', error);
+      alert('Failed to analyze the uploaded document.');
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('medresearch_jwt');
+    localStorage.removeItem('medresearch_user');
+    setAuthToken('');
+    setCurrentUser(null);
+    setSavedHistory([]);
+    setDrawerOpen(false);
+  };
+
+  const handleNewChat = () => {
+    setQuery('');
+    setPubmedPapers([]);
+    setOpenAlexPapers([]);
+    setTrials([]);
+    setAiSummary('');
+    setChatMessages([]);
+    setSearched(false);
+    setCurrentChatId(null);
+    setDrawerOpen(false);
+  };
+
+  const featuredTopics = [
+    { title: 'Lung cancer', subtitle: 'Treatment pathways and biomarkers', query: 'lung cancer treatment' },
+    { title: 'Diabetes', subtitle: 'Clinical evidence and trial outcomes', query: 'diabetes clinical trials' },
+    { title: 'Alzheimer disease', subtitle: 'Emerging therapeutic strategies', query: 'Alzheimer disease' },
+    { title: 'Cardiovascular disease', subtitle: 'Risk profiles and interventions', query: 'heart disease clinical research' },
+  ];
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        background: `radial-gradient(circle at top, ${theme.primarySoft}, transparent 46%), ${theme.bg}`,
+        color: theme.text,
+        fontFamily: 'Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+        position: 'relative',
+        overflow: 'hidden',
+      }}
+    >
+      <ParticleBackground darkMode={darkMode} />
+
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileUpload}
+        accept=".pdf,image/png,image/jpeg,image/webp"
+        style={{ display: 'none' }}
+      />
+
+      <header
+        style={{
+          position: 'relative',
+          zIndex: 2,
+          maxWidth: 1180,
+          margin: '0 auto',
+          padding: '24px 20px 12px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: 16,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button
+            type="button"
+            onClick={() => setDrawerOpen(true)}
+            style={{
+              width: 42,
+              height: 42,
+              border: `1px solid ${theme.border}`,
+              background: theme.panel,
+              color: theme.text,
+              borderRadius: 14,
+              boxShadow: theme.shadow,
+              cursor: 'pointer',
+              fontSize: 14,
+              fontWeight: 700,
+            }}
+          >
+            Menu
+          </button>
+
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              background: theme.panel,
+              border: `1px solid ${theme.border}`,
+              borderRadius: 16,
+              padding: '10px 14px',
+              boxShadow: theme.shadow,
+            }}
+          >
+            <div
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 9,
+                background: 'linear-gradient(135deg, #1d4ed8, #60a5fa)',
+                color: '#fff',
+                display: 'grid',
+                placeItems: 'center',
+                fontWeight: 800,
+                fontSize: 12,
+              }}
+            >
+              M
+            </div>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: '0.08em', color: theme.secondaryText, textTransform: 'uppercase' }}>Clinical intelligence</div>
+              <div style={{ fontSize: 15, fontWeight: 800 }}>MedResearch</div>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button
+            type="button"
+            onClick={() => setShowHowItWorks(true)}
+            style={{
+              background: theme.panel,
+              border: `1px solid ${theme.border}`,
+              color: theme.text,
+              borderRadius: 999,
+              padding: '10px 14px',
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            About
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setDarkMode((prev) => !prev)}
+            style={{
+              background: theme.panel,
+              border: `1px solid ${theme.border}`,
+              color: theme.text,
+              borderRadius: 999,
+              padding: '10px 14px',
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            {darkMode ? 'Light mode' : 'Dark mode'}
+          </button>
+
+          {currentUser ? (
+            <button
+              type="button"
+              onClick={handleLogout}
+              style={{
+                background: theme.primary,
+                color: '#fff',
+                border: 'none',
+                borderRadius: 999,
+                padding: '10px 14px',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              {currentUser.name || 'Account'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode('login');
+                setAuthModalOpen(true);
+              }}
+              style={{
+                background: theme.primary,
+                color: '#fff',
+                border: 'none',
+                borderRadius: 999,
+                padding: '10px 16px',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              Sign in
+            </button>
+          )}
+        </div>
+      </header>
+
+      {drawerOpen && (
+        <div
+          onClick={() => setDrawerOpen(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.38)',
+            zIndex: 40,
+            backdropFilter: 'blur(4px)',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 340,
+              maxWidth: '86vw',
+              height: '100%',
+              background: theme.panel,
+              borderRight: `1px solid ${theme.border}`,
+              boxShadow: theme.shadow,
+              padding: 20,
+              boxSizing: 'border-box',
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+              <div style={{ fontSize: 20, fontWeight: 800 }}>Saved searches</div>
+              <button type="button" onClick={() => setDrawerOpen(false)} style={{ border: 'none', background: 'transparent', color: theme.secondaryText, fontSize: 20, cursor: 'pointer' }}>×</button>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleNewChat}
+              style={{
+                background: theme.primary,
+                color: '#fff',
+                border: 'none',
+                borderRadius: 14,
+                padding: '12px 16px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                marginBottom: 18,
+              }}
+            >
+              New search
+            </button>
+
+            {currentUser ? (
+              <div style={{ padding: '12px 14px', borderRadius: 16, background: theme.panelSecondary, marginBottom: 18 }}>
+                <div style={{ fontWeight: 700 }}>{currentUser.name}</div>
+                <div style={{ fontSize: 12, color: theme.secondaryText }}>{currentUser.email}</div>
+              </div>
+            ) : (
+              <div style={{ padding: '14px', borderRadius: 16, background: theme.panelSecondary, marginBottom: 18, color: theme.secondaryText }}>
+                Sign in to keep a history of your research sessions.
+              </div>
+            )}
+
+            <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {savedHistory.length === 0 ? (
+                <div style={{ color: theme.secondaryText, paddingTop: 10 }}>No saved conversations yet.</div>
+              ) : (
+                savedHistory.map((chat) => (
+                  <button
+                    key={chat._id}
+                    type="button"
+                    onClick={() => {
+                      setCurrentChatId(chat._id);
+                      const topic = chat.topic || chat.title || '';
+                      setQuery(topic);
+                      setChatMessages(chat.messages || []);
+                      setSearched(true);
+                      setDrawerOpen(false);
+                      executeSearch(topic, trialStatusFilter, chat._id);
+                    }}
+                    style={{
+                      textAlign: 'left',
+                      border: `1px solid ${theme.border}`,
+                      background: currentChatId === chat._id ? theme.panelSecondary : 'transparent',
+                      borderRadius: 14,
+                      padding: '12px 14px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <div style={{ fontWeight: 700 }}>{chat.title || chat.topic}</div>
+                    <div style={{ fontSize: 12, color: theme.secondaryText }}>{new Date(chat.createdAt).toLocaleDateString()}</div>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {authModalOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.54)',
+            display: 'grid',
+            placeItems: 'center',
+            zIndex: 50,
+            padding: 16,
+          }}
+        >
+          <div
+            style={{
+              width: 420,
+              maxWidth: '100%',
+              background: theme.panel,
+              border: `1px solid ${theme.border}`,
+              borderRadius: 28,
+              boxShadow: theme.shadow,
+              padding: 28,
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+              <h3 style={{ margin: 0, fontSize: 24 }}>{authMode === 'login' ? 'Welcome back' : 'Create account'}</h3>
+              <button type="button" onClick={() => setAuthModalOpen(false)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: theme.secondaryText, fontSize: 26 }}>×</button>
+            </div>
+
+            {authError && (
+              <div style={{ background: 'rgba(220,38,38,0.08)', color: theme.danger, borderRadius: 12, padding: '10px 12px', marginBottom: 16, fontWeight: 600 }}>
+                {authError}
+              </div>
+            )}
+
+            <form onSubmit={handleAuthSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {authMode === 'register' && (
+                <label style={{ display: 'grid', gap: 8, fontWeight: 600, color: theme.secondaryText }}>
+                  Full name
+                  <input
+                    type="text"
+                    value={authForm.name}
+                    onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })}
+                    placeholder="Jane Doe"
+                    style={{ background: theme.input, border: `1px solid ${theme.border}`, color: theme.text, borderRadius: 12, padding: '12px 14px', outline: 'none' }}
+                  />
+                </label>
+              )}
+
+              <label style={{ display: 'grid', gap: 8, fontWeight: 600, color: theme.secondaryText }}>
+                Email
+                <input
+                  type="email"
+                  value={authForm.email}
+                  onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })}
+                  placeholder="name@example.com"
+                  style={{ background: theme.input, border: `1px solid ${theme.border}`, color: theme.text, borderRadius: 12, padding: '12px 14px', outline: 'none' }}
+                />
+              </label>
+
+              <label style={{ display: 'grid', gap: 8, fontWeight: 600, color: theme.secondaryText }}>
+                Password
+                <input
+                  type="password"
+                  value={authForm.password}
+                  onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
+                  placeholder="••••••••"
+                  style={{ background: theme.input, border: `1px solid ${theme.border}`, color: theme.text, borderRadius: 12, padding: '12px 14px', outline: 'none' }}
+                />
+              </label>
+
+              <button
+                type="submit"
+                disabled={authLoading}
+                style={{
+                  background: theme.primary,
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: 14,
+                  padding: '14px 18px',
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                {authLoading ? 'Processing...' : authMode === 'login' ? 'Sign in' : 'Create account'}
+              </button>
+            </form>
+
+            <div style={{ marginTop: 18, textAlign: 'center', color: theme.secondaryText }}>
+              {authMode === 'login' ? (
+                <>
+                  Need an account?{' '}
+                  <button type="button" onClick={() => setAuthMode('register')} style={{ border: 'none', background: 'transparent', color: theme.primary, fontWeight: 700, cursor: 'pointer' }}>Create one</button>
+                </>
+              ) : (
+                <>
+                  Already registered?{' '}
+                  <button type="button" onClick={() => setAuthMode('login')} style={{ border: 'none', background: 'transparent', color: theme.primary, fontWeight: 700, cursor: 'pointer' }}>Sign in</button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <main style={{ position: 'relative', zIndex: 2, maxWidth: 1160, margin: '0 auto', padding: '12px 20px 80px' }}>
+        <section
+          style={{
+            background: theme.panel,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 32,
+            boxShadow: theme.shadow,
+            padding: '28px',
+            marginBottom: 24,
+          }}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 14 }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', color: theme.secondaryText, letterSpacing: '0.08em' }}>Medical research</div>
+                <h1 style={{ margin: '8px 0 0', fontSize: 'clamp(2.25rem, 6vw, 4.5rem)', lineHeight: 1.05, letterSpacing: '-0.06em', fontWeight: 800 }}>
+                  Find clinically meaningful evidence faster.
+                </h1>
+              </div>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                <button type="button" onClick={() => executeSearch('lung cancer treatment')} style={{ background: theme.primarySoft, border: `1px solid ${theme.primary}`, color: theme.primary, borderRadius: 999, padding: '10px 14px', fontWeight: 700 }}>Trending</button>
+                <button type="button" onClick={() => setAuthModalOpen(true)} style={{ background: theme.panelSecondary, border: `1px solid ${theme.border}`, color: theme.text, borderRadius: 999, padding: '10px 14px', fontWeight: 700 }}>Save session</button>
+              </div>
+            </div>
+
+            <form onSubmit={handleSearchSubmit} style={{ display: 'flex', gap: 12, alignItems: 'center', background: theme.input, border: `1px solid ${theme.border}`, borderRadius: 20, padding: '10px 12px 10px 18px' }}>
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search diseases, treatments, biomarkers, or trials"
+                style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', fontSize: 18, color: theme.text }}
+              />
+
+              <button type="button" onClick={() => fileInputRef.current?.click()} style={{ background: theme.panel, border: `1px solid ${theme.border}`, borderRadius: 12, padding: '10px 12px', cursor: 'pointer', fontWeight: 700 }}>Upload report</button>
+              <button type="submit" disabled={loading || !query.trim()} style={{ background: theme.primary, color: '#fff', border: 'none', borderRadius: 14, padding: '12px 16px', fontWeight: 800, cursor: 'pointer' }}>Search</button>
+            </form>
+
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              {recentSearches.map((term, index) => (
+                <button key={`${term}-${index}`} type="button" onClick={() => handleRecentClick(term)} style={{ background: theme.chip, border: `1px solid ${theme.border}`, color: theme.primary, borderRadius: 999, padding: '8px 12px', cursor: 'pointer', fontWeight: 700 }}>
+                  {term}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <LandingHero theme={theme} />
+
+        {!searched && (
+          <section style={{ marginTop: 18 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16 }}>
+              {featuredTopics.map((item) => (
+                <button
+                  key={item.title}
+                  type="button"
+                  onClick={() => handleTopicClick(item)}
+                  style={{
+                    textAlign: 'left',
+                    background: theme.panel,
+                    border: `1px solid ${theme.border}`,
+                    borderRadius: 24,
+                    padding: 20,
+                    boxShadow: theme.shadow,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <div style={{ fontSize: 12, fontWeight: 700, color: theme.secondaryText, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Topic</div>
+                  <div style={{ fontSize: 22, fontWeight: 800, marginTop: 12 }}>{item.title}</div>
+                  <div style={{ color: theme.secondaryText, marginTop: 8 }}>{item.subtitle}</div>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {searched && (
+          <section style={{ marginTop: 28 }}>
+            <div style={{ background: theme.panel, border: `1px solid ${theme.border}`, borderRadius: 28, boxShadow: theme.shadow, padding: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, flexWrap: 'wrap', marginBottom: 18 }}>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: theme.secondaryText, letterSpacing: '0.08em', textTransform: 'uppercase' }}>Evidence review</div>
+                  <h2 style={{ margin: '8px 0 0', fontSize: 30 }}>{query}</h2>
+                </div>
+                <button type="button" onClick={() => setSearched(false)} style={{ background: theme.primarySoft, color: theme.primary, border: `1px solid ${theme.primary}`, borderRadius: 999, padding: '10px 16px', fontWeight: 700, cursor: 'pointer' }}>Back</button>
+              </div>
+
+              {loading && <div style={{ color: theme.secondaryText, padding: '10px 0' }}>Retrieving literature and trials...</div>}
+
+              {!loading && aiSummary && (
+                <div style={{ background: theme.panelSecondary, borderRadius: 20, padding: 18, border: `1px solid ${theme.border}`, marginBottom: 18 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: theme.primary }}>AI synthesis</div>
+                  <div style={{ marginTop: 12, lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{aiSummary}</div>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 18 }}>
+                {['pubmed', 'openalex', 'trials'].map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => setActiveTab(tab)}
+                    style={{
+                      background: activeTab === tab ? theme.primary : theme.panelSecondary,
+                      color: activeTab === tab ? '#fff' : theme.text,
+                      border: `1px solid ${theme.border}`,
+                      borderRadius: 999,
+                      padding: '10px 14px',
+                      cursor: 'pointer',
+                      fontWeight: 700,
+                    }}
+                  >
+                    {tab === 'pubmed' ? 'PubMed' : tab === 'openalex' ? 'OpenAlex' : 'Trials'}
+                    {tab === 'pubmed' && ` (${pubmedPapers.length})`}
+                    {tab === 'openalex' && ` (${openAlexPapers.length})`}
+                    {tab === 'trials' && ` (${trials.length})`}
+                  </button>
+                ))}
+              </div>
+
+              {activeTab === 'trials' && (
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 18 }}>
+                  {['ALL', 'RECRUITING', 'COMPLETED'].map((status) => (
+                    <button
+                      key={status}
+                      type="button"
+                      onClick={() => handleStatusFilterChange(status)}
+                      style={{
+                        background: trialStatusFilter === status ? theme.primary : theme.panelSecondary,
+                        color: trialStatusFilter === status ? '#fff' : theme.text,
+                        border: `1px solid ${theme.border}`,
+                        borderRadius: 999,
+                        padding: '8px 12px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {status}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {activeTab === 'pubmed' && (
+                <div style={{ display: 'grid', gap: 14 }}>
+                  {pubmedPapers.map((paper) => (
+                    <article key={paper.id} style={{ background: theme.panelSecondary, borderRadius: 18, border: `1px solid ${theme.border}`, padding: 18 }}>
+                      <div style={{ fontSize: 12, color: theme.primary, fontWeight: 700 }}>PubMed • {paper.id}</div>
+                      <h3 style={{ margin: '10px 0 8px', fontSize: 18 }}>{paper.title}</h3>
+                      <div style={{ color: theme.secondaryText, fontSize: 14 }}>{paper.authors}</div>
+                      <div style={{ color: theme.secondaryText, fontSize: 14, marginTop: 6 }}>{paper.source} • {paper.pubDate}</div>
+                      <a href={paper.url} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 12, color: theme.primary, fontWeight: 700 }}>View source</a>
+                    </article>
+                  ))}
+                </div>
+              )}
+
+              {activeTab === 'openalex' && (
+                <div style={{ display: 'grid', gap: 14 }}>
+                  {openAlexPapers.map((paper) => (
+                    <article key={paper.id} style={{ background: theme.panelSecondary, borderRadius: 18, border: `1px solid ${theme.border}`, padding: 18 }}>
+                      <div style={{ fontSize: 12, color: theme.primary, fontWeight: 700 }}>OpenAlex • {paper.citations} citations</div>
+                      <h3 style={{ margin: '10px 0 8px', fontSize: 18 }}>{paper.title}</h3>
+                      <div style={{ color: theme.secondaryText, fontSize: 14 }}>{paper.authors}</div>
+                      <div style={{ color: theme.secondaryText, fontSize: 14, marginTop: 6 }}>{paper.source} • {paper.pubDate}</div>
+                      <a href={paper.url} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 12, color: theme.primary, fontWeight: 700 }}>View record</a>
+                    </article>
+                  ))}
+                </div>
+              )}
+
+              {activeTab === 'trials' && (
+                <div style={{ display: 'grid', gap: 14 }}>
+                  {trials.map((trial) => (
+                    <article key={trial.nctId} style={{ background: theme.panelSecondary, borderRadius: 18, border: `1px solid ${theme.border}`, padding: 18 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <div style={{ fontSize: 12, color: theme.primary, fontWeight: 700 }}>{trial.nctId}</div>
+                        <div style={{ background: theme.primarySoft, color: theme.primary, borderRadius: 999, padding: '6px 10px', fontSize: 12, fontWeight: 700 }}>{trial.status}</div>
+                      </div>
+                      <h3 style={{ margin: '10px 0 8px', fontSize: 18 }}>{trial.title}</h3>
+                      <div style={{ color: theme.secondaryText, fontSize: 14 }}>{trial.conditions}</div>
+                      <div style={{ color: theme.secondaryText, fontSize: 14, marginTop: 6 }}>Age {trial.minAge} – {trial.maxAge} • {trial.sex}</div>
+                      <a href={trial.url} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 12, color: theme.primary, fontWeight: 700 }}>View protocol</a>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {aiSummary && (
+              <div style={{ background: theme.panel, border: `1px solid ${theme.border}`, borderRadius: 28, boxShadow: theme.shadow, padding: 20, marginTop: 24 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18, gap: 12, flexWrap: 'wrap' }}>
+                  <h3 style={{ margin: 0, fontSize: 22 }}>Ask about these findings</h3>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 18 }}>
+                  {chatMessages.map((msg, index) => (
+                    <div key={`${msg.role}-${index}`} style={{ alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', background: msg.role === 'user' ? theme.primary : theme.panelSecondary, color: msg.role === 'user' ? '#fff' : theme.text, borderRadius: 18, padding: '10px 14px', maxWidth: '80%', lineHeight: 1.6 }}>
+                      {msg.text}
+                    </div>
+                  ))}
+                </div>
+
+                <form onSubmit={handleSendMessage} style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    placeholder="Ask a question about the evidence..."
+                    style={{ flex: 1, background: theme.input, border: `1px solid ${theme.border}`, borderRadius: 14, padding: '12px 14px', outline: 'none', color: theme.text }}
+                  />
+                  <button type="submit" disabled={chatLoading} style={{ background: theme.primary, color: '#fff', border: 'none', borderRadius: 14, padding: '12px 16px', fontWeight: 800, cursor: 'pointer' }}>
+                    {chatLoading ? 'Sending...' : 'Ask'}
+                  </button>
+                </form>
+              </div>
+            )}
+          </section>
+        )}
+      </main>
+
+      {showHowItWorks && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.52)',
+            zIndex: 55,
+            display: 'grid',
+            placeItems: 'center',
+            padding: 18,
+          }}
+        >
+          <div style={{ width: 560, maxWidth: '100%', background: theme.panel, borderRadius: 28, border: `1px solid ${theme.border}`, boxShadow: theme.shadow, padding: 24 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h3 style={{ margin: 0, fontSize: 22 }}>About MedResearch</h3>
+              <button type="button" onClick={() => setShowHowItWorks(false)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: theme.secondaryText, fontSize: 24 }}>×</button>
+            </div>
+            <p style={{ color: theme.secondaryText, lineHeight: 1.7 }}>
+              MedResearch is a biomedical evidence platform built to streamline the research process. It retrieves medical literature, identifies relevant clinical trials, and synthesizes evidence into understandable summaries that support faster clinical decision-making.
+            </p>
+            <div style={{ marginTop: 18, display: 'grid', gap: 12 }}>
+              <div style={{ background: theme.panelSecondary, borderRadius: 18, border: `1px solid ${theme.border}`, padding: 16 }}>
+                <div style={{ fontWeight: 800, marginBottom: 8 }}>Evidence retrieval</div>
+                <div style={{ color: theme.secondaryText }}>Live querying of PubMed, OpenAlex, and ClinicalTrials.gov.</div>
+              </div>
+              <div style={{ background: theme.panelSecondary, borderRadius: 18, border: `1px solid ${theme.border}`, padding: 16 }}>
+                <div style={{ fontWeight: 800, marginBottom: 8 }}>AI synthesis</div>
+                <div style={{ color: theme.secondaryText }}>Structured summaries from consolidated scientific outputs.</div>
+              </div>
+              <div style={{ background: theme.panelSecondary, borderRadius: 18, border: `1px solid ${theme.border}`, padding: 16 }}>
+                <div style={{ fontWeight: 800, marginBottom: 8 }}>Clinical triage</div>
+                <div style={{ color: theme.secondaryText }}>Review trial eligibility and clinical relevance in context.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default App;
+
